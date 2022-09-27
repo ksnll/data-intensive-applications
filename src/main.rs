@@ -1,5 +1,7 @@
-use std::io::prelude::*;
 use std::fs::OpenOptions;
+use std::net::{TcpListener, TcpStream};
+use std::io::{prelude::*, BufReader};
+use std::thread;
 
 
 fn append_to_db(key: u32, data: &str) -> std::io::Result<usize> {
@@ -22,20 +24,50 @@ fn get_from_db(key: u32) -> Option<String> {
     lines.filter_map(|x| x.ok()).find(|line| line.starts_with(&key.to_string()))
 }
 
+fn handle_connection(mut stream: TcpStream) {
+    let mut write_stream = stream.try_clone().unwrap();
+    let mut buf_reader = BufReader::new(&mut stream);
+    let mut string_buffer = String::new();
+    loop {
+        let line = buf_reader
+            .read_line(&mut string_buffer);
+        let string = string_buffer.strip_suffix("\n").unwrap();
+
+        let tokens: Vec<&str> = string.split(' ').collect();
+        match line {
+            Ok(0) => break,
+            Ok(_) => match tokens[0] {
+                "get" => {
+                    let key = tokens[1].parse::<u32>().expect("key should be a number");
+                    let record = get_from_db(key).expect("key not found");
+                    write_stream.write(record.as_bytes()).expect("failed to write to stream");
+                    write_stream.write(b"\n").expect("failed to write to stream");
+                },
+                "set" => {
+                    let key = tokens[1].parse::<u32>().expect("key should be a number");
+                    append_to_db(key, &tokens[2..].join(" ")).expect("could not write to db");
+                    write_stream.write(b"Ok").expect("failed to write to stream");
+                    write_stream.write(b"\n").expect("failed to write to stream");
+
+                },
+                _ => println!("only supported commands are get/set")
+            },
+            Err(e) => {println!("Error {e}"); break; }
+        }
+        string_buffer.truncate(0);
+    }
+}
+
 fn main() {
-    let operation = std::env::args().nth(1).expect("no action given, use get/set");
-    match operation.as_str() {
-        "get" => {
-            let key: u32 = std::env::args().nth(2).expect("no key given").parse().unwrap();
-            let record = get_from_db(key).expect("key not found");
-            println!("Read from db: {}", record)
-        },
-        "set" => {
-            let key: u32 = std::env::args().nth(2).expect("no key given").parse().unwrap();
-            let data = std::env::args().nth(3).expect("no data given");
-            append_to_db(key, data.as_str()).expect("could not write to db");
-            println!("Wrote to db")
-        },
-        _ => println!("only supported commands are get/set")
+    let listener = TcpListener::bind("127.0.0.1:9999").unwrap();
+    for stream in listener.incoming() {
+        thread::spawn(|| {
+            match stream {
+                Ok(stream) => {
+                    handle_connection(stream);
+                }
+                Err(e) => { panic!("Error connecting {}", e) }
+            }
+        });
     }
 }
