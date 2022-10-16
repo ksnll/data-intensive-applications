@@ -72,20 +72,20 @@ fn handle_connection(mut stream: TcpStream, index: &Arc<Index>) {
                     let key = tokens[1].parse::<usize>().expect("key should be a number");
                     let record = get_from_db(key, index).expect("key not found");
                     write_stream
-                        .write(record.as_bytes())
+                        .write_all(record.as_bytes())
                         .expect("failed to write to stream");
                     write_stream
-                        .write(b"\n")
+                        .write_all(b"\n")
                         .expect("failed to write to stream");
                 }
                 "set" => {
                     let key = tokens[1].parse::<usize>().expect("key should be a number");
                     append_to_db(key, &tokens[2..].join(" ")).expect("could not write to db");
                     write_stream
-                        .write(b"Ok")
+                        .write_all(b"Ok")
                         .expect("failed to write to stream");
                     write_stream
-                        .write(b"\n")
+                        .write_all(b"\n")
                         .expect("failed to write to stream");
                 }
                 _ => println!("only supported commands are get/set"),
