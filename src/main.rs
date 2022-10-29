@@ -20,8 +20,8 @@ async fn build_index_from_db() -> Result<Index> {
         index.insert(
             tokens_vec[0].parse().unwrap(),
             (
-                index_pointer + line_number,
-                tokens_vec[1].len() + tokens_vec[0].len() + 2,
+                index_pointer + line_number + tokens_vec[0].len() + 2,
+                tokens_vec[1].len(),
             ),
         );
         line_number += 1;
@@ -70,19 +70,30 @@ async fn handle_connection(mut stream: TcpStream, index: &Arc<Index>) -> Result<
 
         let tokens: Vec<&str> = string.split(' ').collect();
         match tokens[0] {
-            "get" => {
-                let key = tokens[1].parse::<usize>().expect("key should be a number");
-                let record = get_from_db(key, index).await?;
-                wx.write_all(record.as_bytes()).await?;
-                wx.write_all(b"\n").await?;
+            "get" => match tokens[1].parse::<usize>() {
+                Ok(key) => {
+                    let record = get_from_db(key, index).await?;
+                    wx.write_all(record.as_bytes()).await?;
+                    wx.write_all(b"\n").await?;
+                }
+                Err(_) => {
+                    wx.write_all(b"Key should be a number\n").await?;
+                }
+            },
+            "set" => match tokens[1].parse::<usize>() {
+                Ok(key) => {
+                    append_to_db(key, &tokens[2..].join(" ")).await?;
+                    wx.write_all(b"Ok").await?;
+                    wx.write_all(b"\n").await?;
+                }
+                Err(_) => {
+                    wx.write_all(b"Key should be a number\n").await?;
+                }
+            },
+            _ => {
+                wx.write_all("Only supported commands are get/set\n".as_bytes())
+                    .await?;
             }
-            "set" => {
-                let key = tokens[1].parse::<usize>().expect("key should be a number");
-                append_to_db(key, &tokens[2..].join(" ")).await?;
-                wx.write_all(b"Ok").await?;
-                wx.write_all(b"\n").await?;
-            }
-            _ => println!("only supported commands are get/set"),
         }
         string_buffer.truncate(0);
     }
@@ -91,8 +102,6 @@ async fn handle_connection(mut stream: TcpStream, index: &Arc<Index>) -> Result<
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let index = build_index_from_db().await?;
-    println!("1 {:?}", index[&1]);
-    println!("2 {:?}", index[&2]);
     let index = Arc::new(index);
     let listener = TcpListener::bind("127.0.0.1:9999").await?;
     loop {
