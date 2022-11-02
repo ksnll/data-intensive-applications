@@ -69,10 +69,10 @@ async fn load_file_into_hashmap(db_file: &str) -> Result<HashMap<usize, IndexRec
             key,
             IndexRecord {
                 position: distance_from_start,
-                size: line.len() - key.to_string().len() + 1,
+                size: line.len() - key.to_string().len() - 1,
             },
         );
-        reader_pointer = reader_pointer + key.to_string().len() + 2 + value.len();
+        reader_pointer = reader_pointer + key.to_string().len() + value.len() + 2;
     }
     Ok(index)
 }
@@ -90,9 +90,11 @@ async fn create_indexes_from_disk() -> Result<Vec<FileIndex>> {
 }
 
 async fn db_get_value_from_key(
-    index: &(String, Mutex<HashMap<usize, IndexRecord>>),
+    indexes: &Arc<Mutex<Vec<FileIndex>>>,
     key: usize,
 ) -> Result<Vec<u8>> {
+    let unlocked_index = indexes.lock().await;
+    let index = unlocked_index.last().context("Failed to get last index")?;
     let (filename, index) = index;
 
     let index = index.lock().await;
@@ -109,16 +111,12 @@ async fn db_set_key(
     key: usize,
     value: &str,
 ) -> Result<()> {
-    let unlocked_index = indexes.lock().await;
-
+    let mut unlocked_index = indexes.lock().await;
     let (filename, last_index) = unlocked_index.last().context("Failed to get last index")?;
     let last_index = last_index.lock().await;
     if last_index.len() > MAX_INDEX_SIZE {
         let filename = format!("append.{}.db", uuid::Uuid::new_v4());
-        indexes
-            .lock()
-            .await
-            .push((String::from(filename), Mutex::new(HashMap::new())));
+        unlocked_index.push((String::from(filename), Mutex::new(HashMap::new())));
     }
     let mut file = File::open(filename).await?;
     let position = file.metadata().await?.len();
@@ -165,13 +163,9 @@ async fn handle_connection(
     let mut buf_reader = BufReader::new(read_stream);
     loop {
         buf_reader.read_line(&mut line).await?;
-        let unlocked_indexes = indexes.lock().await;
-        let last_index = unlocked_indexes
-            .last()
-            .context("Failed to find last index")?;
         match get_operation_from_line(&line) {
             Ok(Operation::Get(key)) => {
-                let mut value = db_get_value_from_key(&last_index, key).await?;
+                let mut value = db_get_value_from_key(&(indexes.clone()), key).await?;
                 value.push(b'\n');
                 if let Err(e) = write_stream.write_all(&value).await {
                     println!("Error writing to stream {}", e)
