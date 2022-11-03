@@ -25,7 +25,7 @@ struct IndexRecord {
     size: usize,
 }
 
-type FileIndex = (String, Mutex<HashMap<usize, IndexRecord>>);
+type FileIndex = (String, HashMap<usize, IndexRecord>);
 
 fn list_db_files() -> Result<Vec<String>> {
     let mut files: Vec<String> = vec![];
@@ -83,7 +83,7 @@ async fn create_indexes_from_disk() -> Result<Vec<FileIndex>> {
     for db_file in db_files {
         indexes.push((
             String::from(&db_file),
-            Mutex::new(load_file_into_hashmap(&db_file).await?),
+            load_file_into_hashmap(&db_file).await?,
         ));
     }
     Ok(indexes)
@@ -97,7 +97,6 @@ async fn db_get_value_from_key(
     let index = unlocked_index.last().context("Failed to get last index")?;
     let (filename, index) = index;
 
-    let index = index.lock().await;
     let index_record = index.get(&key).context("Key not found in the index")?;
     let mut db = File::open(&(filename)).await?;
     let mut value_from_db = vec![0u8; index_record.size];
@@ -113,20 +112,17 @@ async fn db_set_key(
 ) -> Result<()> {
     let mut unlocked_index = indexes.lock().await;
     let (filename, last_index) = unlocked_index.last().context("Failed to get last index")?;
-    let last_index = last_index.lock().await;
+    let mut file = File::open(filename).await?;
     if last_index.len() > MAX_INDEX_SIZE {
         let filename = format!("append.{}.db", uuid::Uuid::new_v4());
-        unlocked_index.push((String::from(filename), Mutex::new(HashMap::new())));
+        unlocked_index.push((String::from(filename), HashMap::new()));
     }
-    let mut file = File::open(filename).await?;
     let position = file.metadata().await?.len();
     file.seek(SeekFrom::End(0)).await?;
     file.write_all(format!("{},{}\n", key, value).as_bytes())
         .await?;
-    let (_, hashmap) = unlocked_index.last().context("Failed to get last index")?;
+    let (_, hashmap) = unlocked_index.last_mut().context("Failed to get last index")?;
     hashmap
-        .lock()
-        .await
         .insert(
             key,
             IndexRecord {
@@ -156,7 +152,7 @@ fn get_operation_from_line(line: &str) -> Result<Operation> {
 
 async fn handle_connection(
     mut tcp_stream: TcpStream,
-    indexes: &Arc<Mutex<Vec<FileIndex>>>,
+    indexes: &mut Arc<Mutex<Vec<FileIndex>>>,
 ) -> Result<()> {
     let mut line = String::new();
     let (read_stream, mut write_stream) = tcp_stream.split();
@@ -165,14 +161,14 @@ async fn handle_connection(
         buf_reader.read_line(&mut line).await?;
         match get_operation_from_line(&line) {
             Ok(Operation::Get(key)) => {
-                let mut value = db_get_value_from_key(&(indexes.clone()), key).await?;
+                let mut value = db_get_value_from_key(indexes, key).await?;
                 value.push(b'\n');
                 if let Err(e) = write_stream.write_all(&value).await {
                     println!("Error writing to stream {}", e)
                 }
             }
             Ok(Operation::Set(key, value)) => {
-                match db_set_key(&mut (indexes.clone()), key, &value).await {
+                match db_set_key(indexes, key, &value).await {
                     Ok(_) => write_stream.write_all(b"Setting key\n").await?,
                     Err(_) => write_stream.write_all(b"Failed to write key\n").await?,
                 }
@@ -199,9 +195,9 @@ async fn main() -> Result<()> {
     loop {
         let (tcp_stream, _addr) = listener.accept().await?;
         println!("New connection");
-        let indexes = indexes.clone();
+        let mut indexes = indexes.clone();
         tokio::spawn(async move {
-            match handle_connection(tcp_stream, &indexes).await {
+            match handle_connection(tcp_stream, &mut indexes).await {
                 Ok(()) => Ok(()),
                 Err(_) => Err(anyhow!("Failed to handle connection")),
             }
